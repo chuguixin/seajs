@@ -2,29 +2,26 @@
  * util-events.js - The minimal events support
  */
 
-var eventsCache = {}
+var events = data.events = {}
 
 // Bind event
-seajs.on = function(event, callback) {
-  if (!callback) return seajs
-
-  var list = eventsCache[event] || (eventsCache[event] = [])
+seajs.on = function(name, callback) {
+  var list = events[name] || (events[name] = [])
   list.push(callback)
-
   return seajs
 }
 
 // Remove event. If `callback` is undefined, remove all callbacks for the
 // event. If `event` and `callback` are both undefined, remove all callbacks
 // for all events
-seajs.off = function(event, callback) {
+seajs.off = function(name, callback) {
   // Remove *all* events
-  if (!(event || callback)) {
-    eventsCache = {}
+  if (!(name || callback)) {
+    events = data.events = {}
     return seajs
   }
 
-  var list = eventsCache[event]
+  var list = events[name]
   if (list) {
     if (callback) {
       for (var i = list.length - 1; i >= 0; i--) {
@@ -34,42 +31,28 @@ seajs.off = function(event, callback) {
       }
     }
     else {
-      delete eventsCache[event]
+      delete events[name]
     }
   }
 
   return seajs
 }
 
-// Emit event, firing all bound callbacks. Callbacks are passed the same
-// arguments as `emit` is, apart from the event name
-var emit = seajs.emit = function(event) {
-  var list = eventsCache[event]
-  if (!list) return seajs
+// Emit event, firing all bound callbacks. Callbacks receive the same
+// arguments as `emit` does, apart from the event name
+var emit = seajs.emit = function(name, data) {
+  var list = events[name], fn
 
-  var args = []
+  if (list) {
+    // Copy callback lists to prevent modification
+    list = list.slice()
 
-  // Fill up `args` with the callback arguments.  Since we're only copying
-  // the tail of `arguments`, a loop is much faster than Array#slice
-  for (var i = 1, len = arguments.length; i < len; i++) {
-    args[i - 1] = arguments[i]
+    // Execute event callbacks
+    while ((fn = list.shift())) {
+      fn(data)
+    }
   }
-
-  // Copy callback lists to prevent modification
-  list = list.slice()
-
-  // Execute event callbacks
-  forEach(list, function(fn) {
-    fn.apply(global, args)
-  })
 
   return seajs
 }
-
-// Emit event and return the specified property of the data
-function emitData(event, data, prop) {
-  emit(event, data)
-  return data[prop || keys(data)[0]]
-}
-
 

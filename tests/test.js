@@ -1,20 +1,82 @@
+
+if (typeof global === 'undefined') {
+  global = this
+}
+
+if (typeof require === 'function') {
+  var __require = require
+}
+
+// Hack `console` for testing
+(function() {
+  var console = global.console || ( global.console = {})
+  var stack = global.consoleMsgStack = []
+
+  console._log = console.log || noop
+  console._warn = console.warn || noop
+
+  console.log = function(msg) {
+    stack.push(msg)
+    console._log(msg)
+  }
+
+  console.warn = function(msg) {
+    stack.push(msg)
+    console._warn(msg)
+  }
+
+  function noop() {}
+
+})()
+
+// Add `printResult` and `printHeader` for browser environment
+if (typeof document !== 'undefined') {
+
+  global.printResult = function(txt, style) {
+    var d = document.createElement('div')
+    d.innerHTML = txt
+    d.className = style
+    document.getElementById('out').appendChild(d)
+  }
+
+  global.printHeader = function(test, url) {
+    var h = document.createElement('h3')
+    h.innerHTML = test +
+        (url ? ' <a class="hash" href="' + url + '">#</a>' : '')
+    document.getElementById('out').appendChild(h)
+  }
+
+}
+
+
+// Define test module
 (function(factory) {
 
   if (typeof define === 'function') {
     define(factory)
   }
-  else if (typeof exports !== 'undefined') {
+  else if (typeof require === 'function') {
     factory(require, exports)
   }
   else {
-    factory(null, (this['test'] = {}))
+    factory({}, (global.test = {}))
   }
 
 })(function(require, exports) {
 
+  var WARNING_TIME = isLocal() ? 50 : 5000
+  var isNode = typeof process !== 'undefined'
+  var INITIAL_CWD = isNode && seajs.data.cwd
+
+  var queue = []
+  var time
+
+  isNode || require.async && require.async('./style.css')
+  handleGlobalError()
+
 
   exports.print = function(txt, style) {
-    sendMessage('printResults', txt, style || 'info')
+    sendMessage('printResult', txt, style || 'info')
   }
 
   exports.assert = function (guard, message) {
@@ -31,36 +93,96 @@
   }
 
   exports.next = function() {
-    setTimeout(function() {
-      sendMessage('testNext')
-    }, 500) // Leave time for async operation
+    if (queue.length) {
+      printElapsedTime()
+
+      var id = queue.shift()
+      sendMessage('printHeader', id, getSingleSpecUri(id))
+      id = reset(id)
+
+      time = now()
+      seajs.use(id2File(id))
+    }
+    else {
+      printElapsedTime()
+      exports.done()
+    }
+  }
+
+  exports.run = function(ids) {
+    var id = parseIdFromUri()
+    queue = id ? [id] : ids
+    exports.next()
   }
 
   exports.done = function() {
-    exports.print('[DONE]')
-    exports.next()
+    sendMessage('testNextPage')
   }
 
 
-  function error(err) {
-    // Firefox will throw an error when script is 404
-    if (err !== 'Error loading script') {
-      exports.print('[ERROR] ' + err, 'error')
+  // Helpers
+
+  var data = global.seajs && seajs.data || {}
+  var defaultConfig = copy(data, {})
+
+  function reset(id) {
+    global.consoleMsgStack.length = 0
+    seajs.off()
+
+    // Restore default configurations
+    copy(defaultConfig, data)
+
+    // Reset plugins
+    for (var uri in seajs.cache) {
+      if (uri.indexOf('/dist/seajs-') > 0) {
+        delete seajs.cache[uri]
+        delete seajs.data.fetchedList[uri]
+
+        if (typeof process !== 'undefined' &&
+            process.execPath.indexOf('node.exe') > 0) {
+          uri = uri.replace(/\//g, '\\')
+        }
+
+        __require && delete __require.cache[uri]
+      }
     }
-    exports.next()
-  }
 
-  // Collect errors in browser environment
-  if (typeof process === 'undefined') {
-    var _onerror = window.onerror
-    window.onerror = function(err) {
-      if (_onerror) _onerror(err)
-      error(err)
+    // Change cwd and base to tests/specs/xxx
+    if (isNode) {
+      var parts = id.split('/')
+      process.chdir(INITIAL_CWD + 'tests/specs/' + parts[0])
+      seajs.config({ cwd: normalize(process.cwd()) + "/" })
+      id = parts[1]
     }
+
+    // Set base to current working directory
+    seajs.config({
+      base: './'
+    })
+
+    return id
   }
 
+  function copy(from, to) {
+    for (var p in to) {
+      if (to.hasOwnProperty(p)) {
+        delete to[p]
+      }
+    }
+
+    for (p in from) {
+      if (from.hasOwnProperty(p)) {
+        to[p] = from[p]
+      }
+    }
+
+    return to
+  }
 
   function sendMessage(fn, msg, type) {
+    // Emit global message for test adapter
+    global.publish && global.publish(fn, msg, type)
+
     var p = this
     if (this != this.parent) {
       p = this.parent
@@ -70,7 +192,13 @@
       p[fn](msg, type)
     }
     else if (msg && typeof console !== 'undefined') {
-      console.log(color(msg, type))
+      // Call original log function
+      console._log(color(msg, type))
+
+      // Stop on failure
+      if (type === 'fail') {
+        throw new Error(msg)
+      }
     }
   }
 
@@ -83,7 +211,73 @@
   }
 
   function color(str, type) {
-    return '\033[' + ANSI_CODES[type] + 'm  ' + str + '\033[0m'
+    return '\033[' + (ANSI_CODES[type] || ANSI_CODES['info'])
+        + 'm  ' + str + '\033[0m'
+  }
+
+  function handleGlobalError() {
+    if (typeof window === 'undefined' || window.onerror) return
+
+    window.onerror = function(err) {
+      // Old Safari and Firefox will throw an error when script is 404
+      if (err !== 'Error loading script') {
+        exports.print('[ERROR] ' + err, 'error')
+      }
+
+      // Go on
+      exports.next()
+    }
+  }
+
+  function getSingleSpecUri(id) {
+    // For Node.js
+    if (typeof location === 'undefined') {
+      return ''
+    }
+
+    return location.href.replace(/\?.*$/, '') + '?' + encodeURIComponent(id)
+  }
+
+  function parseIdFromUri() {
+    // For Node.js
+    if (typeof location === 'undefined') {
+      return ''
+    }
+
+    return decodeURIComponent(location.search)
+        .replace(/&?t=\d+/, '').substring(1)
+  }
+
+  function id2File(id) {
+    return id.indexOf('.js') > 0 ? id : './' + id + '/main.js'
+  }
+
+  function printElapsedTime() {
+    if (time) {
+      var diff = now() - time
+      var style = diff > WARNING_TIME ? 'warn' : 'info'
+      exports.print('Elapsed time: ' + diff + 'ms', style + ' time')
+    }
+  }
+
+  function now() {
+    return new Date().getTime()
+  }
+
+  function isLocal() {
+    // For Node.js
+    if (typeof location === 'undefined') {
+      return true
+    }
+
+    var host = location.host
+    return location.href.indexOf('file://') === 0 ||
+        host === 'localhost' || host === '127.0.0.1'
+  }
+
+  function normalize(path) {
+    return path.replace(/\\/g, "/")
   }
 
 })
+
