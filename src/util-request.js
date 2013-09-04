@@ -3,17 +3,20 @@
  * ref: tests/research/load-js-css/test.html
  */
 
-var head = doc.head ||
-    doc.getElementsByTagName("head")[0] ||
-    doc.documentElement
-
+var head = doc.getElementsByTagName("head")[0] || doc.documentElement
 var baseElement = head.getElementsByTagName("base")[0]
 
 var IS_CSS_RE = /\.css(?:\?|$)/i
-var READY_STATE_RE = /loaded|complete|undefined/
-
 var currentlyAddingScript
 var interactiveScript
+
+// `onload` event is not supported in WebKit < 535.23 and Firefox < 9.0
+// ref:
+//  - https://bugs.webkit.org/show_activity.cgi?id=38995
+//  - https://bugzilla.mozilla.org/show_bug.cgi?id=185236
+//  - https://developer.mozilla.org/en/HTML/Element/link#Stylesheet_load_events
+var isOldWebKit = +navigator.userAgent
+    .replace(/.*AppleWebKit\/(\d+)\..*/, "$1") < 536
 
 
 function request(url, callback, charset) {
@@ -27,13 +30,14 @@ function request(url, callback, charset) {
     }
   }
 
-  assetOnload(node, callback)
+  addOnload(node, callback, isCSS, url)
 
   if (isCSS) {
     node.rel = "stylesheet"
     node.href = url
-  } else {
-    node.async = "async"
+  }
+  else {
+    node.async = true
     node.src = url
   }
 
@@ -50,55 +54,45 @@ function request(url, callback, charset) {
   currentlyAddingScript = null
 }
 
-function assetOnload(node, callback) {
-  if (node.nodeName === "SCRIPT") {
-    scriptOnload(node, callback)
-  }
-  else {
-    styleOnload(node, callback)
-  }
-}
+function addOnload(node, callback, isCSS, url) {
+  var supportOnload = "onload" in node
 
-function scriptOnload(node, callback) {
-  node.onload = node.onerror = node.onreadystatechange = function() {
-    if (READY_STATE_RE.test(node.readyState)) {
-
-      // Ensure only run once and handle memory leak in IE
-      node.onload = node.onerror = node.onreadystatechange = null
-
-      // Remove the script to reduce memory leak
-      if (!configData.debug) {
-        head.removeChild(node)
-      }
-
-      // Dereference the node
-      node = undefined
-
-      if (callback) {
-        callback()
-      }
-    }
-  }
-}
-
-function styleOnload(node, callback) {
   // for Old WebKit and Old Firefox
-  if (isOldWebKit || isOldFirefox) {
-    log("Start css polling")
-
+  if (isCSS && (isOldWebKit || !supportOnload)) {
     setTimeout(function() {
       pollCss(node, callback)
     }, 1) // Begin after node insertion
+    return
+  }
+
+  if (supportOnload) {
+    node.onload = onload
+    node.onerror = function() {
+      emit("error", { uri: url, node: node })
+      onload()
+    }
   }
   else {
-    node.onload = node.onerror = function() {
-      node.onload = node.onerror = null
-      node = undefined
-
-      if (callback) {
-        callback()
+    node.onreadystatechange = function() {
+      if (/loaded|complete/.test(node.readyState)) {
+        onload()
       }
     }
+  }
+
+  function onload() {
+    // Ensure only run once and handle memory leak in IE
+    node.onload = node.onerror = node.onreadystatechange = null
+
+    // Remove the script to reduce memory leak
+    if (!isCSS && !data.debug) {
+      head.removeChild(node)
+    }
+
+    // Dereference the node
+    node = null
+
+    callback()
   }
 }
 
@@ -130,13 +124,13 @@ function pollCss(node, callback) {
 
   setTimeout(function() {
     if (isLoaded) {
-      // Place callback in here due to giving time for style rendering
+      // Place callback here to give time for style rendering
       callback()
     }
     else {
       pollCss(node, callback)
     }
-  }, 1)
+  }, 20)
 }
 
 function getCurrentScript() {
@@ -145,7 +139,7 @@ function getCurrentScript() {
   }
 
   // For IE6-9 browsers, the script onload event may not fire right
-  // after the the script is evaluated. Kris Zyp found that it
+  // after the script is evaluated. Kris Zyp found that it
   // could query the script nodes and the one that is in "interactive"
   // mode indicates the current script
   // ref: http://goo.gl/JHfFW
@@ -163,19 +157,4 @@ function getCurrentScript() {
     }
   }
 }
-
-
-var UA = navigator.userAgent
-
-// `onload` event is supported in WebKit since 535.23
-// ref: https://bugs.webkit.org/show_activity.cgi?id=38995
-var isOldWebKit = Number(UA.replace(/.*AppleWebKit\/(\d+)\..*/, "$1")) < 536
-
-// `onload/onerror` event is supported since Firefox 9.0
-// ref:
-//  - https://bugzilla.mozilla.org/show_bug.cgi?id=185236
-//  - https://developer.mozilla.org/en/HTML/Element/link#Stylesheet_load_events
-var isOldFirefox = UA.indexOf("Firefox") > 0 &&
-    !("onload" in doc.createElement("link"))
-
 
